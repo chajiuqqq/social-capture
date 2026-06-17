@@ -2,6 +2,8 @@
 """Capture a Xiaohongshu post via xhs API and output JSON for secret-collector."""
 
 import json
+import os
+import subprocess
 import sys
 import urllib.request
 
@@ -52,11 +54,26 @@ if posted_raw:
     date_part, time_part = posted_raw.split("_")
     posted_at = f"{date_part}T{time_part}+08:00"
 
+def download_video(url, output_path="/tmp/xhs_video.mp4"):
+    """Download video using yt-dlp."""
+    cmd = [
+        "yt-dlp", "--no-warnings", "--no-cache-dir",
+        "--force-overwrites",
+        "-f", "best",
+        "-o", output_path,
+        url
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"yt-dlp warning: {result.stderr}", file=sys.stderr)
+    return output_path
+
+
 # Build media
 media = []
-# For 图文 posts, all download URLs are images
-# For 视频 posts, API does not return video URL (known limitation)
-if post_type == "图文" and media_urls:
+if post_type == "视频":
+    media.append({"kind": "video", "url": download_video(INPUT_URL)})
+elif post_type == "图文" and media_urls:
     for url in media_urls:
         media.append({"kind": "image", "url": url})
 

@@ -11,7 +11,7 @@ Capture social media post metadata and media from Xiaohongshu or X/Twitter, and 
 
 - secret-collector backend running at `http://localhost:8080` (see TOOLS.md for deploy details)
 - Proxy for X/Twitter access (scripts read `HTTPS_PROXY` env, default: `http://192.168.39.240:7890`)
-- yt-dlp available for X video downloads
+- yt-dlp available for video downloads (X and Xiaohongshu)
 
 ## Workflow
 
@@ -30,9 +30,7 @@ python3 skills/social-capture/scripts/xhs_capture.py "<FULL_URL>"
 
 The URL **must** include `xsec_token` and `xsec_source` parameters.
 
-Returns JSON with author, content, images. Submit directly to backend.
-
-**Known limitation:** Video posts — API returns no video URL, only metadata.
+Returns JSON with author, content, images. For video posts, downloads via yt-dlp and includes local file path. Submit directly to backend.
 
 ### X/Twitter
 
