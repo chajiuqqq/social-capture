@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Capture a Xiaohongshu post via xhs API and output JSON for secret-collector."""
+"""Capture a Xiaohongshu post via xhs API and output JSON for secret-collector.
+
+Supports both short links (xhslink.com) and full URLs.
+Handles image posts (图文) and video posts (视频).
+
+Video download:
+  - Requires cookies for yt-dlp to work with Xiaohongshu.
+  - Set XHS_COOKIE_FILE env var to path of cookies.txt, or
+  - Set XHS_COOKIE_BROWSER env var to browser name (e.g. chrome).
+  - Without cookies, video posts will capture metadata only (media: []).
+"""
 
 import json
 import os
@@ -13,6 +23,8 @@ if len(sys.argv) < 2:
 
 INPUT_URL = sys.argv[1]
 API_URL = "https://xhs.chajiuqqq.cn/xhs/detail"
+COOKIE_FILE = os.environ.get("XHS_COOKIE_FILE", "")
+COOKIE_BROWSER = os.environ.get("XHS_COOKIE_BROWSER", "")
 
 # 1. Call xhs API
 req_body = json.dumps({"url": INPUT_URL, "download": False}).encode()
@@ -23,11 +35,18 @@ req = urllib.request.Request(API_URL, data=req_body, headers={
 with urllib.request.urlopen(req) as resp:
     result = json.loads(resp.read())
 
-if result.get("code") != 0:
-    print(f"API error: {result.get('msg', 'unknown')}", file=sys.stderr)
+# API returns either {"code": 0, "data": ...} or {"message": "success", "data": ...}
+# Check for error: if code exists and != 0, OR if message indicates failure
+code = result.get("code")
+msg = result.get("message", result.get("msg", ""))
+if code is not None and code != 0:
+    print(f"API error (code={code}): {msg}", file=sys.stderr)
+    sys.exit(1)
+if isinstance(msg, str) and ("失败" in msg or "error" in msg.lower()):
+    print(f"API error: {msg}", file=sys.stderr)
     sys.exit(1)
 
-data = result["data"]
+data = result.get("data", {})
 
 # 2. Extract fields
 note_id = data.get("作品ID", data.get("note_id", ""))
@@ -38,6 +57,7 @@ desc = data.get("作品描述", "")
 post_type = data.get("作品类型", "")  # "图文" or "视频"
 posted_raw = data.get("发布时间", "")  # "YYYY-MM-DD_HH:MM:SS"
 media_urls = data.get("下载地址", [])
+canonical_url = data.get("作品链接", "")
 
 # Build content: title first, then description
 content_parts = []
@@ -50,37 +70,65 @@ content = "\n".join(content_parts)
 # Convert posted_at
 posted_at = ""
 if posted_raw:
-    # "YYYY-MM-DD_HH:MM:SS" -> ISO 8601
-    date_part, time_part = posted_raw.split("_")
-    posted_at = f"{date_part}T{time_part}+08:00"
+    try:
+        date_part, time_part = posted_raw.split("_")
+        posted_at = f"{date_part}T{time_part}+08:00"
+    except ValueError:
+        posted_at = posted_raw
 
-def download_video(url, output_path="/tmp/xhs_video.mp4"):
-    """Download video using yt-dlp."""
+def download_video_xhs(url, output_path="/tmp/xhs_video.mp4"):
+    """Download Xiaohongshu video using yt-dlp.
+
+    Requires cookies for video access. Try cookie file then browser.
+    Returns path on success, None on failure.
+    """
+    download_url = url
     cmd = [
         "yt-dlp", "--no-warnings", "--no-cache-dir",
         "--force-overwrites",
         "-f", "best",
         "-o", output_path,
-        url
     ]
+    # Add cookies if available
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        cmd.extend(["--cookies", COOKIE_FILE])
+    elif COOKIE_BROWSER:
+        cmd.extend(["--cookies-from-browser", COOKIE_BROWSER])
+
+    cmd.append(download_url)
+
     result = subprocess.run(cmd, capture_output=True, text=True)
+
     if result.returncode != 0:
-        print(f"yt-dlp warning: {result.stderr}", file=sys.stderr)
+        stderr = result.stderr or ""
+        if "No video formats found" in stderr:
+            print("yt-dlp: No video formats found (XHS requires cookies)", file=sys.stderr)
+            print("yt-dlp hint: Set XHS_COOKIE_FILE or XHS_COOKIE_BROWSER env var", file=sys.stderr)
+        else:
+            print(f"yt-dlp warning: {stderr}", file=sys.stderr)
+        if not os.path.exists(output_path):
+            return None
     return output_path
 
 
 # Build media
 media = []
 if post_type == "视频":
-    media.append({"kind": "video", "url": download_video(INPUT_URL)})
+    download_src = canonical_url if canonical_url else f"https://www.xiaohongshu.com/explore/{note_id}"
+    video_path = download_video_xhs(download_src)
+    if video_path:
+        media.append({"kind": "video", "url": video_path})
 elif post_type == "图文" and media_urls:
     for url in media_urls:
-        media.append({"kind": "image", "url": url})
+        if url:
+            media.append({"kind": "image", "url": url})
 
 # Build output
 output = {
     "platform": "xiaohongshu",
-    "original_url": f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else INPUT_URL,
+    "original_url": canonical_url if canonical_url else (
+        f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else INPUT_URL
+    ),
     "author_name": author,
     "content": content,
     "media": media,

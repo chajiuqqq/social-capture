@@ -2,6 +2,7 @@
 """Capture an X/Twitter post and output JSON for secret-collector.
 
 Requires: proxy access to X/Twitter, yt-dlp for video posts.
+Proxy: reads HTTPS_PROXY env var, defaults to http://127.0.0.1:7890 (mihomo).
 """
 
 import html
@@ -17,30 +18,53 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 TWEET_URL = sys.argv[1]
-PROXY = os.environ.get("HTTPS_PROXY", "http://192.168.39.240:7890")
+PROXY = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", "http://127.0.0.1:7890"))
+
+def build_opener(proxy_url):
+    """Build a urllib opener with proxy support for both http and https."""
+    proxy_handler = urllib.request.ProxyHandler({
+        "http": proxy_url,
+        "https": proxy_url,
+    })
+    return urllib.request.build_opener(proxy_handler)
+
+OPENER = build_opener(PROXY)
 
 def get_oembed(url):
     """Fetch oembed metadata for a tweet."""
     oembed_url = f"https://publish.twitter.com/oembed?url={url}"
     req = urllib.request.Request(oembed_url)
-    req.set_proxy(PROXY, "https")
-    with urllib.request.urlopen(req) as resp:
+    with OPENER.open(req) as resp:
         return json.loads(resp.read())
 
 def extract_content(html_text):
-    """Extract clean text content from oembed html field."""
-    # Remove script tags
+    """Extract clean text content from oembed html field.
+
+    Strategy: extract text inside the <p> blockquote paragraph tag.
+    The oembed HTML format is:
+      <blockquote><p>TWEET_TEXT <a>pic.twitter.com/xxx</a></p>&mdash; AUTHOR ...</blockquote>
+    """
+    # Try extracting from <p> tag first (cleanest approach)
+    p_match = re.search(r'<p[^>]*>(.*?)</p>', html_text)
+    if p_match:
+        p_content = p_match.group(1)
+        # Remove embedded <a> links (pic.twitter.com, t.co)
+        p_content = re.sub(r'<a[^>]+>.*?</a>', '', p_content)
+        # Remove <br> tags
+        p_content = re.sub(r'<br\s*/?>', '\n', p_content)
+        # HTML unescape
+        p_content = html.unescape(p_content).strip()
+        return p_content
+
+    # Fallback: old strip-all-tags approach for unexpected formats
     text = re.sub(r'<script[^>]*>.*?</script>', '', html_text, flags=re.DOTALL)
-    # Remove all HTML tags
     text = re.sub(r'<[^>]+>', '', text)
-    # HTML unescape
     text = html.unescape(text)
     # Remove lines starting with — or &mdash; (author/date line)
     lines = text.split('\n')
     lines = [l for l in lines if not l.strip().startswith('—') and not l.strip().startswith('–')]
-    # Remove trailing pic.twitter.com links
     text = '\n'.join(lines).strip()
-    text = re.sub(r'\s*pic\.twitter\.com/\S+\s*$', '', text)
+    text = re.sub(r'/\s*pic\.twitter\.com/\S+/\s*$', '', text)
     return text.strip()
 
 def extract_images(url):
@@ -48,8 +72,7 @@ def extract_images(url):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
-    req.set_proxy(PROXY, "https")
-    with urllib.request.urlopen(req) as resp:
+    with OPENER.open(req) as resp:
         html_content = resp.read().decode()
 
     media_urls = re.findall(r'https://pbs\.twimg\.com/media/[\w\-]+\.(?:jpg|png|jpeg)', html_content)
@@ -63,14 +86,23 @@ def is_video_post(url):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
-    req.set_proxy(PROXY, "https")
-    with urllib.request.urlopen(req) as resp:
+    with OPENER.open(req) as resp:
         html_content = resp.read().decode()
 
     has_video_thumb = 'amplify_video_thumb' in html_content
+    # Also check if this is a multi-media tweet with video (newer format)
+    has_video_tag = 'video' in html_content.lower() and ('twitter:player' in html_content or 'media:video' in html_content)
+
     media_imgs = re.findall(r'https://pbs\.twimg\.com/media/[\w\-]+\.(?:jpg|png|jpeg)', html_content)
     non_thumb = [u for u in media_imgs if 'amplify_video_thumb' not in u and 'profile_images' not in u]
-    return has_video_thumb and not non_thumb
+
+    # If it has video thumb but no real images, it's a pure video post
+    # If it has both non-thumb images AND video, still capture as images (combo post)
+    if has_video_thumb and not non_thumb:
+        return True
+    if has_video_tag and not non_thumb:
+        return True
+    return False
 
 def download_video(url, output_path="/tmp/x_video.mp4"):
     """Download video using yt-dlp."""
@@ -85,6 +117,8 @@ def download_video(url, output_path="/tmp/x_video.mp4"):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"yt-dlp warning: {result.stderr}", file=sys.stderr)
+        if not os.path.exists(output_path):
+            return None
     return output_path
 
 # 1. Get oembed metadata
@@ -110,7 +144,8 @@ output = {
 # 3. Extract media
 if is_video_post(TWEET_URL):
     video_path = download_video(TWEET_URL)
-    output["media"] = [{"kind": "video", "url": video_path}]
+    if video_path:
+        output["media"] = [{"kind": "video", "url": video_path}]
 else:
     images = extract_images(TWEET_URL)
     for img_url in images:
