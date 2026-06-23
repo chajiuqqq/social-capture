@@ -21,7 +21,11 @@ TWEET_URL = sys.argv[1]
 PROXY = os.environ.get("HTTPS_PROXY", os.environ.get("https_proxy", "http://127.0.0.1:7890"))
 
 def build_opener(proxy_url):
-    """Build a urllib opener with proxy support for both http and https."""
+    """Build a urllib opener with proxy support for both http and https.
+    Returns a plain opener if proxy_url is empty or None.
+    """
+    if not proxy_url:
+        return urllib.request.build_opener()
     proxy_handler = urllib.request.ProxyHandler({
         "http": proxy_url,
         "https": proxy_url,
